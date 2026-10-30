@@ -275,10 +275,43 @@ class KomikkuFitFrame(io.ComfyNode):
         return io.NodeOutput(image)
 
 
+class KomikkuShotFrames(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KomikkuShotFrames",
+            display_name="Komikku Shot Frames",
+            category="Minimax-H3-Komikku",
+            description="Finds the hard cuts of the multishot video and returns the middle frame of each shot, one per panel of the layout. "
+                        "The cuts are the largest frame-to-frame changes, so it always returns as many frames as the page has panels.",
+            inputs=[
+                io.Image.Input("video", tooltip="Decoded frames of the multishot video."),
+                PageLayout.Input("layout", force_input=True),
+                io.Int.Input("min_shot_frames", default=8, min=1, max=240, tooltip="Shortest shot in frames; cuts closer than this are ignored."),
+            ],
+            outputs=[io.Image.Output(display_name="frames")],
+        )
+
+    @classmethod
+    def execute(cls, video, layout, min_shot_frames) -> io.NodeOutput:
+        count = len(json.loads(layout)["panels"])
+        small = torch.nn.functional.interpolate(video.movedim(-1, 1), size=(64, 64), mode="area")
+        diff = (small[1:] - small[:-1]).abs().mean(dim=(1, 2, 3)).tolist()
+        cuts = []
+        for i in sorted(range(len(diff)), key=lambda i: diff[i], reverse=True):
+            cut = i + 1
+            if len(cuts) == count - 1:
+                break
+            if min(cut, len(video) - cut) >= min_shot_frames and all(abs(cut - c) >= min_shot_frames for c in cuts):
+                cuts.append(cut)
+        bounds = [0] + sorted(cuts) + [len(video)]
+        return io.NodeOutput(video[[(a + b) // 2 for a, b in zip(bounds, bounds[1:])]])
+
+
 class KomikkuExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [KomikkuPageLayout, KomikkuFitFrame, KomikkuPageCompose]
+        return [KomikkuPageLayout, KomikkuShotFrames, KomikkuFitFrame, KomikkuPageCompose]
 
 
 async def comfy_entrypoint() -> KomikkuExtension:

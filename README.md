@@ -32,6 +32,10 @@ Outputs:
 - `panel_width` / `panel_height`: one value per panel, from its aspect on the page and `panel_megapixels`.
 - `layout`: the page layout, for the compose node.
 
+### Komikku Shot Frames
+
+Finds the hard cuts of the multishot video and returns the middle frame of each shot, one per panel of the layout. The cuts are the largest frame-to-frame changes, so it always returns as many frames as the page has panels and needs no extra dependencies. `min_shot_frames` ignores cuts closer than that many frames.
+
 ### Komikku Fit Frame
 
 This utility node is optional and bypassed in the example workflow. It center-crops each shot frame toward its panel's aspect ratio before the reframe model, so the model never fills more than `max_extend` times the frame. It removes content from the frame, so the example workflow instead generates the video at 1:1, which suits both wide and tall panels. A 21:9 strip made from a 9:16 frame comes back mirrored, with two moons; from a 1:1 frame it keeps one.
@@ -59,7 +63,20 @@ Files the editors write:
 | Installed fonts | `user/<user>/komikku_fonts/` |
 | Image library (only starred images) | `user/<user>/komikku_library/` |
 
-## Example workflow
+## Example workflows
+
+### Simple
+
+`example_workflows/Minimax-H3-Komikku-Simple.json` needs only this pack and core ComfyUI:
+
+1. Komikku Page & Shots builds the H3 prompt from the page.
+2. H3 ref2vid generates the multishot video from Picture 1 and saves it.
+3. Komikku Shot Frames takes one frame per shot.
+4. Komikku Page Compose crops each frame into its panel and letters the page.
+
+Panels are cropped from the video frames, so the video is generated at 1:1 to fit both wide and tall panels.
+
+### Full
 
 `example_workflows/Minimax-H3-Komikku.json` runs the full pipeline:
 
