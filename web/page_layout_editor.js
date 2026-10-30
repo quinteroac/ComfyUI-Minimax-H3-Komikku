@@ -1,4 +1,6 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+import { detectPanels } from "./panel_detect.js";
 import { assistPanel, generateText } from "./text_assist.js";
 
 const NODE_CLASS = "KomikkuPageLayout";
@@ -128,6 +130,19 @@ function cutPanel(p, a, b, layout) {
     if (one.length < 3 || two.length < 3 || polygonArea(one) < minArea || polygonArea(two) < minArea) return null;
     const [first, second] = readingOrder([shapeFrom(p, one.map(toPage)), shapeFrom(p, two.map(toPage))], layout.direction);
     return [{ ...first, prompt: p.prompt, weight: p.weight ?? 1 }, { ...second, prompt: "", weight: 1 }];
+}
+
+// Detected outlines that are boxes become plain rect panels.
+function importedShape(pts) {
+    const p = setPolygon({}, pts);
+    const near = (a, b) => Math.abs(a - b) < 0.006;
+    if (pts.length === 4 && pts.every(([x, y]) => (near(x, p.x) || near(x, p.x + p.w)) && (near(y, p.y) || near(y, p.y + p.h)))) delete p.polygon;
+    return p;
+}
+
+function inputUrl(name) {
+    const i = name.lastIndexOf("/");
+    return api.apiURL(`/view?filename=${encodeURIComponent(name.slice(i + 1))}&subfolder=${encodeURIComponent(name.slice(0, Math.max(0, i)))}&type=input`);
 }
 
 function translated(p, dx, dy) {
@@ -280,6 +295,10 @@ const CSS = `
 .h3pe-safe { position: absolute; border: 1px dashed rgba(0,0,0,.16); pointer-events: none; }
 .h3pe-panel { position: absolute; background: #fff; cursor: move; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
 .h3pe-panel.empty { background: repeating-linear-gradient(135deg, #fff 0 8px, #f3f0e8 8px 16px); }
+.h3pe-ref { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+.h3pe-page.has-ref .h3pe-panel, .h3pe-page.has-ref .h3pe-panel.empty { background: rgba(255,255,255,.18); }
+.h3pe-page.has-ref .h3pe-panel span { background: rgba(255,255,255,.85); }
+.h3pe input[type=range] { flex: 3; min-width: 0; accent-color: var(--pe-accent); }
 .h3pe-panel span { padding: 5px 10px 7px; color: #3a3833; font-size: 11px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .h3pe-panel.empty span { color: #aaa497; font-style: italic; }
 .h3pe-lines, .h3pv-lines, .h3pe-guide { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
@@ -516,12 +535,26 @@ class PageEditor {
         this.rtlBtn = button("← Manga", "Right to left: panel numbers and splits follow manga reading order", () => this.setDirection("rtl"), "outline");
         this.ltrBtn = button("Comic →", "Left to right: western comic reading order", () => this.setDirection("ltr"), "outline");
         const size = el("span", "h3pe-x", "×");
+        // Import: copy the panel layout of an existing page, which stays behind the panels as a reference.
+        const file = el("input");
+        file.type = "file";
+        file.accept = "image/*";
+        file.style.display = "none";
+        file.addEventListener("change", () => { if (file.files[0]) this.importPage(file.files[0]); file.value = ""; });
+        this.importBtn = button("📄 Import page…", "Copy the panel layout of an existing comic or manga page", () => file.click(), "outline");
+        this.refOpacity = el("input");
+        this.refOpacity.type = "range";
+        Object.assign(this.refOpacity, { min: 0, max: 1, step: 0.05, title: "Reference opacity" });
+        this.refOpacity.addEventListener("input", () => { this.layout.reference.opacity = Number(this.refOpacity.value); this.renderReference(); });
+        this.refRow = field("Reference", this.refOpacity, button("✕", "Remove the reference page", () => { this.snapshot(); delete this.layout.reference; this.render(); }, "icon outline"));
         left.appendChild(section("Page",
             field("Format", this.pageSelect),
             field("Size", this.pageW, size, this.pageH),
             field("Margin", this.marginInput),
             field("Gutter", this.gutterInput),
-            field("Reading", this.rtlBtn, this.ltrBtn)));
+            field("Reading", this.rtlBtn, this.ltrBtn),
+            field("Import", this.importBtn, file),
+            this.refRow));
 
         const templates = el("div", "h3pe-templates");
         this.presetEls = new Map();
@@ -680,6 +713,47 @@ class PageEditor {
         this.page.style.width = `${w}px`;
         this.page.style.height = `${w / ratio}px`;
         this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    }
+
+    async importPage(file) {
+        this.importBtn.disabled = true;
+        this.hint.textContent = "Finding panels…";
+        try {
+            const image = await createImageBitmap(file);
+            const { panels } = detectPanels(image);
+            if (!panels.length) { this.hint.textContent = "No panels found: the page needs a plain gutter between panels."; return; }
+            const body = new FormData();
+            body.append("image", file, `layout_ref_${Date.now().toString(36)}.png`);
+            body.append("subfolder", "komikku");
+            body.append("type", "input");
+            const res = await api.fetchApi("/upload/image", { method: "POST", body });
+            if (!res.ok) throw new Error(`upload failed (${res.status})`);
+            const data = await res.json();
+            this.snapshot();
+            const H = 257;
+            this.layout.page = { name: "Imported", width: Math.round(H * image.width / image.height), height: H };
+            this.layout.preset = null;
+            this.layout.panels = withShots(readingOrder(panels.map(importedShape), this.layout.direction), this.layout.panels);
+            this.layout.reference = { image: data.subfolder ? `${data.subfolder}/${data.name}` : data.name, opacity: 0.5 };
+            this.sel = 0;
+            this.render();
+        } catch (err) {
+            this.hint.textContent = `Could not import the page: ${err.message}`;
+        } finally {
+            this.importBtn.disabled = false;
+        }
+    }
+
+    renderReference() {
+        const ref = this.layout.reference;
+        this.page.classList.toggle("has-ref", !!ref);
+        this.refRow.style.display = ref ? "" : "none";
+        if (!ref) { this.refImg?.remove(); this.refImg = null; return; }
+        if (!this.refImg) this.refImg = el("img", "h3pe-ref");
+        if (this.refImg.dataset.name !== ref.image) { this.refImg.src = inputUrl(ref.image); this.refImg.dataset.name = ref.image; }
+        this.refImg.style.opacity = ref.opacity;
+        this.refOpacity.value = ref.opacity;
+        if (this.page.firstChild !== this.refImg) this.page.prepend(this.refImg);
     }
 
     setDirection(dir) {
@@ -1089,6 +1163,7 @@ class PageEditor {
         this.clearBtn.disabled = !L.panels.length;
         this.sizeLabel.textContent = `${L.page.name} · ${L.page.width}×${L.page.height} · ${L.panels.length} panels`;
         this.fitPage();
+        this.renderReference();
         this.renderPanels();
         this.renderSide();
         this.renderShots();
