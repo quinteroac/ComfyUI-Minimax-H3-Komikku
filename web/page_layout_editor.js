@@ -8,7 +8,7 @@ const MIN_SIZE = 0.04;
 const SNAP = 0.012;
 const HISTORY_LIMIT = 60;
 
-const PAGES = [
+export const PAGES = [
     { name: "Manga B5", width: 182, height: 257 },
     { name: "Manga A5", width: 148, height: 210 },
     { name: "US comic", width: 168, height: 260 },
@@ -18,7 +18,7 @@ const PAGES = [
 ];
 
 // rows: [weight, [column weights]] top to bottom; cols: [weight, [row weights]] in reading order.
-const PRESETS = [
+export const PRESETS = [
     { id: "splash", name: "Splash", rows: [[1, [1]]] },
     { id: "tiers-2", name: "2 tiers", rows: [[1, [1]], [1, [1]]] },
     { id: "tiers-3", name: "3 tiers", rows: [[1, [1]], [1, [1]], [1, [1]]] },
@@ -38,7 +38,7 @@ const PRESETS = [
 
 const RATIOS = [[1, 1], [4, 3], [3, 2], [16, 9], [2, 1], [21, 9], [3, 1]];
 
-function nearestRatio(a) {
+export function nearestRatio(a) {
     let best = null;
     for (const [w, h] of RATIOS) {
         for (const [rw, rh, r] of [[w, h, w / h], [h, w, h / w]]) {
@@ -56,7 +56,7 @@ function timestamp(seconds) {
 }
 
 // Shot timing: each panel's weight is its share of the duration (panels without one count as 1).
-function shotTimes(panels, duration) {
+export function shotTimes(panels, duration) {
     const total = panels.reduce((sum, p) => sum + (p.weight ?? 1), 0);
     let start = 0;
     return panels.map((p) => {
@@ -67,7 +67,7 @@ function shotTimes(panels, duration) {
 }
 
 // Template panels take over the prompts and length weights of the current panels, in order.
-function withShots(panels, previous) {
+export function withShots(panels, previous) {
     return panels.map((p, i) => ({ ...p, prompt: previous[i]?.prompt ?? "", weight: previous[i]?.weight ?? 1 }));
 }
 
@@ -84,7 +84,7 @@ function setPolygon(p, pts) {
 }
 
 // Pieces that come out axis-aligned stay plain rects.
-function shapeFrom(base, pts) {
+export function shapeFrom(base, pts) {
     const p = setPolygon({ ...base }, pts);
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     if (pts.length === 4 && pts.every(([x, y]) => (near(x, p.x) || near(x, p.x + p.w)) && (near(y, p.y) || near(y, p.y + p.h)))) delete p.polygon;
@@ -117,7 +117,7 @@ function segmentsCross(a, b, c, d) {
 }
 
 // Cuts a panel along the line a-b, leaving one gutter between the pieces. The piece read first keeps the shot.
-function cutPanel(p, a, b, layout) {
+export function cutPanel(p, a, b, layout) {
     const W = layout.page.width, H = layout.page.height;
     const toMm = (q) => [q[0] * W, q[1] * H], toPage = (q) => [q[0] / W, q[1] / H];
     const A = toMm(a), B = toMm(b);
@@ -132,6 +132,29 @@ function cutPanel(p, a, b, layout) {
     return [{ ...first, prompt: p.prompt, weight: p.weight ?? 1 }, { ...second, prompt: "", weight: 1 }];
 }
 
+// Cuts a panel across its box: axis "x" leaves two side-by-side pieces, "y" two stacked ones. `at` is the cut position
+// across the box and `slant` tilts the cut, moving its two ends by -slant/2 and +slant/2 (page fractions).
+export function splitPanel(p, axis, layout, at = 0.5, slant = 0) {
+    const cx = p.x + p.w * at, cy = p.y + p.h * at;
+    return axis === "x" ? cutPanel(p, [cx + slant / 2, p.y], [cx - slant / 2, p.y + p.h], layout)
+        : cutPanel(p, [p.x, cy - slant / 2], [p.x + p.w, cy + slant / 2], layout);
+}
+
+// Knife cut: every panel the segment a-b crosses is cut. Returns the new panels and the index of the first cut one, or null.
+export function knifeCut(layout, a, b) {
+    const results = [];
+    layout.panels.forEach((p, i) => {
+        const pts = corners(p);
+        if (!pts.some((q, k) => segmentsCross(a, b, q, pts[(k + 1) % pts.length]))) return;
+        const pieces = cutPanel(p, a, b, layout);
+        if (pieces) results.push([i, pieces]);
+    });
+    if (!results.length) return null;
+    const panels = layout.panels.slice();
+    for (const [i, pieces] of results.slice().reverse()) panels.splice(i, 1, ...pieces);
+    return { panels, first: results[0][0] };
+}
+
 // Detected outlines that are boxes become plain rect panels.
 function importedShape(pts) {
     const p = setPolygon({}, pts);
@@ -143,6 +166,26 @@ function importedShape(pts) {
 function inputUrl(name) {
     const i = name.lastIndexOf("/");
     return api.apiURL(`/view?filename=${encodeURIComponent(name.slice(i + 1))}&subfolder=${encodeURIComponent(name.slice(0, Math.max(0, i)))}&type=input`);
+}
+
+// Copies the panel layout of an existing page: finds its panels, uploads it as the editor reference and returns the new layout.
+export async function importPageLayout(file, layout) {
+    const image = await createImageBitmap(file);
+    const { panels } = detectPanels(image);
+    if (!panels.length) throw new Error("no panels found: the page needs a plain gutter between panels");
+    const body = new FormData();
+    body.append("image", file, `layout_ref_${Date.now().toString(36)}.png`);
+    body.append("subfolder", "komikku");
+    body.append("type", "input");
+    const res = await api.fetchApi("/upload/image", { method: "POST", body });
+    if (!res.ok) throw new Error(`upload failed (${res.status})`);
+    const data = await res.json();
+    const H = 257;
+    return {
+        ...layout, page: { name: "Imported", width: Math.round(H * image.width / image.height), height: H }, preset: null,
+        panels: withShots(readingOrder(panels.map(importedShape), layout.direction), layout.panels),
+        reference: { image: data.subfolder ? `${data.subfolder}/${data.name}` : data.name, opacity: 0.5 },
+    };
 }
 
 function translated(p, dx, dy) {
@@ -196,7 +239,7 @@ export function parseLayout(value) {
     try { return JSON.parse(value); } catch { return { page: { ...PAGES[0] }, margin: 10, gutter: 4, direction: "rtl", preset: null, panels: [] }; }
 }
 
-function buildPreset(preset, layout) {
+export function buildPreset(preset, layout) {
     const mx = layout.margin / layout.page.width, my = layout.margin / layout.page.height;
     const gx = layout.gutter / layout.page.width, gy = layout.gutter / layout.page.height;
     const split = (start, length, gap, weights) => {
@@ -224,7 +267,7 @@ function buildPreset(preset, layout) {
     return panels;
 }
 
-function readingOrder(panels, direction) {
+export function readingOrder(panels, direction) {
     const sorted = panels.slice().sort((a, b) => a.y - b.y);
     const rows = [];
     for (const p of sorted) {
@@ -719,26 +762,13 @@ class PageEditor {
         this.importBtn.disabled = true;
         this.hint.textContent = "Finding panels…";
         try {
-            const image = await createImageBitmap(file);
-            const { panels } = detectPanels(image);
-            if (!panels.length) { this.hint.textContent = "No panels found: the page needs a plain gutter between panels."; return; }
-            const body = new FormData();
-            body.append("image", file, `layout_ref_${Date.now().toString(36)}.png`);
-            body.append("subfolder", "komikku");
-            body.append("type", "input");
-            const res = await api.fetchApi("/upload/image", { method: "POST", body });
-            if (!res.ok) throw new Error(`upload failed (${res.status})`);
-            const data = await res.json();
+            const layout = await importPageLayout(file, this.layout);
             this.snapshot();
-            const H = 257;
-            this.layout.page = { name: "Imported", width: Math.round(H * image.width / image.height), height: H };
-            this.layout.preset = null;
-            this.layout.panels = withShots(readingOrder(panels.map(importedShape), this.layout.direction), this.layout.panels);
-            this.layout.reference = { image: data.subfolder ? `${data.subfolder}/${data.name}` : data.name, opacity: 0.5 };
+            this.layout = layout;
             this.sel = 0;
             this.render();
         } catch (err) {
-            this.hint.textContent = `Could not import the page: ${err.message}`;
+            this.hint.textContent = `Could not import the page: ${err.message}.`;
         } finally {
             this.importBtn.disabled = false;
         }
@@ -803,8 +833,7 @@ class PageEditor {
     split(axis) {
         const p = this.layout.panels[this.sel];
         if (!p) return;
-        const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
-        const pieces = axis === "x" ? cutPanel(p, [cx, 0], [cx, 1], this.layout) : cutPanel(p, [0, cy], [1, cy], this.layout);
+        const pieces = splitPanel(p, axis, this.layout);
         if (!pieces) return;
         this.snapshot();
         this.layout.panels.splice(this.sel, 1, ...pieces);
@@ -813,17 +842,11 @@ class PageEditor {
 
     // Cuts every panel the dragged segment crosses.
     applyCut(a, b) {
-        const results = [];
-        this.layout.panels.forEach((p, i) => {
-            const pts = corners(p);
-            if (!pts.some((q, k) => segmentsCross(a, b, q, pts[(k + 1) % pts.length]))) return;
-            const pieces = cutPanel(p, a, b, this.layout);
-            if (pieces) results.push([i, pieces]);
-        });
-        if (!results.length) return;
+        const cut = knifeCut(this.layout, a, b);
+        if (!cut) return;
         this.snapshot();
-        this.sel = results[0][0];
-        for (const [i, pieces] of results.reverse()) this.layout.panels.splice(i, 1, ...pieces);
+        this.sel = cut.first;
+        this.layout.panels = cut.panels;
         this.changed(true);
     }
 
@@ -1365,6 +1388,7 @@ app.registerExtension({
         return {
             KOMIKKU_PAGE_LAYOUT(node, inputName, inputData) {
                 const preview = new PagePreview(node, inputData[1]?.default);
+                node.__komikkuPreview = preview;
                 const widget = node.addDOMWidget(inputName, "KOMIKKU_PAGE_LAYOUT", preview.root, {
                     getValue: () => preview.value,
                     setValue: (v) => { preview.value = v; preview.render(); },

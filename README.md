@@ -56,6 +56,16 @@ Both editors' text assist runs the CLIP Loader wired to the node's optional `ass
 
 Run the workflow once to load the panel images into the editor. After you save, run it again: only the page is recomposed.
 
+### Agent API
+
+Agents and scripts can design and letter pages through `window.komikku` in the ComfyUI page. It provides templates, cuts and shots for the layout, plus framing, lettering with automatic bubble placement, renders and save for the composer. See [docs/AGENT_API.md](docs/AGENT_API.md).
+
+[skills/komikku-pages](skills/komikku-pages) is an agent skill built on the API. It covers laying out the page, writing the shots, running the workflow and lettering, and drives a headless Chromium through `scripts/komikku.cjs`, which needs `playwright-core`. To install it for Claude Code, link it into your skills folder:
+
+```bash
+ln -s "$PWD/skills/komikku-pages" ~/.claude/skills/komikku-pages
+```
+
 Files the editors write:
 
 | What | Where |

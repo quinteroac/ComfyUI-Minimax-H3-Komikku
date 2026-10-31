@@ -18,7 +18,7 @@ const FONTS = [
 ];
 
 // Lettering types. Sizes are font pixels per 1000 px of page width, so the text scales with page_width.
-const TEXT_TYPES = {
+export const TEXT_TYPES = {
     speech: { name: "Speech", tail: true, shape: true, defaults: { size: 34, font: "Comic" } },
     thought: { name: "Thought", tail: true, shape: true, defaults: { size: 32, font: "Comic", italic: true } },
     shout: { name: "Shout", tail: true, shape: true, defaults: { size: 40, font: "Impact", bold: true, border: 4 } },
@@ -97,7 +97,7 @@ function installComposeCss() {
 }
 
 // `imported` only feeds the editor's thumbnails of the images imported into this page; the backend ignores it.
-function parseComposition(value) {
+export function parseComposition(value) {
     const empty = { panels: [], overlays: [], texts: [], imported: [], lettering: null };
     try { return { ...empty, ...JSON.parse(value) }; } catch { return empty; }
 }
@@ -146,7 +146,7 @@ async function uploadImage(blob, filename) {
 
 function uid() { return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`; }
 
-function newText(type, x, y) {
+export function newText(type, x, y) {
     const t = {
         id: uid(), type, text: "", x, y, w: 0.3, h: 0.12, rotation: 0, font: "Comic", size: 34, bold: false, italic: false, vertical: false,
         color: "#111111", fill: "#ffffff", fillOpacity: 1, stroke: "#111111", border: 3, outline: 0, outlineColor: "#ffffff", tail: null,
@@ -174,7 +174,7 @@ async function registerFont(family, data) {
     document.fonts.add(face);
 }
 
-function loadInstalledFonts() {
+export function loadInstalledFonts() {
     fontsLoaded ??= (async () => {
         const files = await api.listUserDataFullInfo(FONT_DIR).catch(() => []);
         for (const { path } of files) {
@@ -192,7 +192,7 @@ function loadInstalledFonts() {
     return fontsLoaded;
 }
 
-function fontString(t, px) {
+export function fontString(t, px) {
     const stack = FONTS.find((f) => f[0] === t.font)?.[1] ?? `'${t.font}', sans-serif`;
     return `${t.italic ? "italic " : ""}${t.bold ? "bold " : ""}${px}px ${stack}`;
 }
@@ -331,6 +331,67 @@ function drawText(ctx, t, W, H) {
     ctx.restore();
 }
 
+// Browser-side approximation of the composed page from the last run's panels, W pixels wide: the node preview
+// until the next run renders the real page, and the page an agent looks at through window.komikku.
+export async function drawPage(layout, comp, previews, pageWidth, border, W = 900) {
+    const H = Math.round(W * layout.page.height / layout.page.width);
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, W, H);
+    const load = (url) => loadImage(url).catch(() => null);
+    const shots = await Promise.all(layout.panels.map((_, i) => previews[i] ? load(viewUrl(previews[i])) : null));
+    const overlays = await Promise.all(comp.overlays.map((ov) => load(inputUrl(ov.image))));
+    const borderPx = border * W / pageWidth;
+    layout.panels.forEach((p, i) => {
+        ctx.save();
+        ctx.beginPath();
+        corners(p).forEach(([x, y], k) => (k ? ctx.lineTo(x * W, y * H) : ctx.moveTo(x * W, y * H)));
+        ctx.closePath();
+        ctx.clip();
+        const img = shots[i];
+        if (img) {
+            const f = comp.panels[i] ?? { zoom: 1, dx: 0, dy: 0 };
+            const bw = p.w * W, bh = p.h * H;
+            const s = Math.max(bw / img.naturalWidth, bh / img.naturalHeight) * f.zoom;
+            ctx.drawImage(img, p.x * W + (bw - img.naturalWidth * s) / 2 + f.dx * bw, p.y * H + (bh - img.naturalHeight * s) / 2 + f.dy * bh, img.naturalWidth * s, img.naturalHeight * s);
+        }
+        comp.overlays.forEach((ov, k) => {
+            if (ov.panel !== i || !overlays[k]) return;
+            ctx.globalAlpha = ov.opacity ?? 1;
+            ctx.drawImage(overlays[k], ov.x * W, ov.y * H, ov.w * W, ov.h * H);
+            ctx.globalAlpha = 1;
+        });
+        // Stroked inside the clip, so twice the width leaves the border inside the panel like the backend does.
+        if (borderPx > 0) {
+            ctx.lineWidth = 2 * borderPx;
+            ctx.strokeStyle = "#000";
+            ctx.stroke();
+        }
+        ctx.restore();
+    });
+    await loadInstalledFonts();
+    await document.fonts.ready;
+    for (const t of comp.texts) drawText(ctx, t, W, H);
+    return canvas;
+}
+
+// Renders the lettering layer at the page size the backend composes and uploads it to input/komikku.
+export async function exportLettering(comp, layout, pageWidth, nodeId) {
+    await loadInstalledFonts();
+    await document.fonts.ready;
+    const H = Math.round(pageWidth * layout.page.height / layout.page.width);
+    const canvas = document.createElement("canvas");
+    canvas.width = pageWidth;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    for (const t of comp.texts) drawText(ctx, t, pageWidth, H);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    return uploadImage(blob, `lettering_${nodeId}_${uid()}.png`);
+}
+
 function rangeInput(min, max, step, onInput, format = (v) => v) {
     const wrap = el("div", "h3pc-range");
     const input = el("input");
@@ -413,63 +474,13 @@ class ComposeEditor {
         this.guardOff();
     }
 
-    // Browser-side approximation of the composed page for the node preview, shown until the next run renders the real one.
-    async renderPreview() {
-        const W = 900, H = Math.round(W * this.layout.page.height / this.layout.page.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = W;
-        canvas.height = H;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#fff";
-        ctx.fillRect(0, 0, W, H);
-        const load = (url) => loadImage(url).catch(() => null);
-        const shots = await Promise.all(this.layout.panels.map((_, i) => this.previews[i] ? load(viewUrl(this.previews[i])) : null));
-        const overlays = await Promise.all(this.comp.overlays.map((ov) => load(inputUrl(ov.image))));
-        const border = (Number(this.widgetValue("border")) || 0) * W / (Number(this.widgetValue("page_width")) || 2480);
-        this.layout.panels.forEach((p, i) => {
-            ctx.save();
-            ctx.beginPath();
-            corners(p).forEach(([x, y], k) => (k ? ctx.lineTo(x * W, y * H) : ctx.moveTo(x * W, y * H)));
-            ctx.closePath();
-            ctx.clip();
-            const img = shots[i];
-            if (img) {
-                const f = this.comp.panels[i] ?? { zoom: 1, dx: 0, dy: 0 };
-                const bw = p.w * W, bh = p.h * H;
-                const s = Math.max(bw / img.naturalWidth, bh / img.naturalHeight) * f.zoom;
-                ctx.drawImage(img, p.x * W + (bw - img.naturalWidth * s) / 2 + f.dx * bw, p.y * H + (bh - img.naturalHeight * s) / 2 + f.dy * bh, img.naturalWidth * s, img.naturalHeight * s);
-            }
-            this.comp.overlays.forEach((ov, k) => {
-                if (ov.panel !== i || !overlays[k]) return;
-                ctx.globalAlpha = ov.opacity ?? 1;
-                ctx.drawImage(overlays[k], ov.x * W, ov.y * H, ov.w * W, ov.h * H);
-                ctx.globalAlpha = 1;
-            });
-            // Stroked inside the clip, so twice the width leaves the border inside the panel like the backend does.
-            if (border > 0) {
-                ctx.lineWidth = 2 * border;
-                ctx.strokeStyle = "#000";
-                ctx.stroke();
-            }
-            ctx.restore();
-        });
-        for (const t of this.comp.texts) drawText(ctx, t, W, H);
-        return canvas.toDataURL("image/jpeg", 0.9);
+    pageWidth() { return Number(this.widgetValue("page_width")) || 2480; }
+
+    renderPreview() {
+        return drawPage(this.layout, this.comp, this.previews, this.pageWidth(), Number(this.widgetValue("border")) || 0).then((c) => c.toDataURL("image/jpeg", 0.9));
     }
 
-    async exportLettering() {
-        await loadInstalledFonts();
-        await document.fonts.ready;
-        const W = Number(this.widgetValue("page_width")) || 2480;
-        const H = Math.round(W * this.layout.page.height / this.layout.page.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = W;
-        canvas.height = H;
-        const ctx = canvas.getContext("2d");
-        for (const t of this.comp.texts) drawText(ctx, t, W, H);
-        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-        return uploadImage(blob, `lettering_${this.node.id}_${uid()}.png`);
-    }
+    exportLettering() { return exportLettering(this.comp, this.layout, this.pageWidth(), this.node.id); }
 
     build() {
         const head = el("div", "h3pe-head");
@@ -954,8 +965,7 @@ class ComposeEditor {
         if (!pw || !ph) return;
         this.page.querySelectorAll(".h3pc-sel, .h3pc-tail").forEach((n) => n.remove());
         drawPanels(this.page, L, "h3pe", this.sel?.kind === "panel" ? this.sel.index : -1);
-        const pageWidthPx = Number(this.widgetValue("page_width")) || 2480;
-        this.page.querySelector(".h3pe-lines").style.setProperty("--bw", `${2 * (Number(this.widgetValue("border")) || 0) * pw / pageWidthPx}px`);
+        this.page.querySelector(".h3pe-lines").style.setProperty("--bw", `${2 * (Number(this.widgetValue("border")) || 0) * pw / this.pageWidth()}px`);
         const panelEls = this.page.querySelectorAll(".h3pe-panel");
         L.panels.forEach((p, i) => {
             const host = panelEls[i];
