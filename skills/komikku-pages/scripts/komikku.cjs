@@ -2,6 +2,8 @@
 // Drives the Komikku editors' window.komikku API from the command line in a headless Chromium.
 // Commands run in order, in one browser session:
 //   load <workflow.json>   load a workflow (UI format) into the ComfyUI page, with every seed set to fixed
+//   refs                   list the reference pictures: each "Picture N" node and the images it holds
+//   ref <n> <img>[,<img>]  upload local images and make them Picture n ("none" empties it)
 //   eval <steps.js>        run the file as the body of an async function in the page: `komikku`, `app` and
 //                          `keep(name, dataUrl)` (saves an image to the out folder) are in scope; the return value is printed
 //   run                    queue the workflow, wait for Komikku Page Compose and save the page as <out>/page_<n>.png
@@ -51,6 +53,41 @@ async function main() {
     page.on("pageerror", (e) => console.error(`page error: ${e.message}`));
     await page.goto(server, { waitUntil: "networkidle" });
     await page.waitForFunction(() => window.app?.graph && window.komikku, null, { timeout: 90000 });
+    // Reference pictures are the workflow nodes titled "Picture N": Load Image, or obvpm Load Images & Compose (several images).
+    await page.evaluate(() => {
+        window.pictures = () => app.graph.nodes.filter((node) => /^Picture \d+$/.test(node.title ?? ""))
+            .map((node) => ({ n: Number(node.title.split(" ")[1]), node })).sort((a, b) => a.n - b.n);
+        window.pictureImages = (node) => {
+            const w = node.widgets.find((x) => x.name === "image" || x.name === "layers");
+            if (w.name === "image") return node.mode === 4 ? [] : [w.value];
+            return JSON.parse(w.value || "[]").map((l) => (typeof l === "string" ? l : l.image));
+        };
+        // A missing Picture N becomes a Load Image wired to the H3 node's next free reference image slot.
+        const addPicture = (n) => {
+            const h3 = app.graph.nodes.find((x) => x.comfyClass === "MiniMaxH3ReferenceToVideo");
+            const slot = h3?.inputs.findIndex((i) => i.name === `ref_images.ref_image_${n - 1}`) ?? -1;
+            if (slot < 0 || h3.inputs[slot].link != null) {
+                throw new Error(`no "Picture ${n}" node and no free H3 reference slot for it: the workflow has Pictures ${pictures().map((p) => p.n).join(", ") || "none"}`);
+            }
+            const last = pictures().at(-1)?.node;
+            const node = LiteGraph.createNode("LoadImage");
+            app.graph.add(node);
+            node.title = `Picture ${n}`;
+            node.pos = last ? [last.pos[0], last.pos[1] + 340] : [h3.pos[0] - 400, h3.pos[1]];
+            node.connect(0, h3, slot);
+            return node;
+        };
+        window.setPicture = (n, names) => {
+            const node = pictures().find((p) => p.n === n)?.node ?? (names.length ? addPicture(n) : null);
+            if (!node) return { n, images: [] };
+            const w = node.widgets.find((x) => x.name === "image" || x.name === "layers");
+            if (w.name === "layers") w.value = JSON.stringify(names.map((image) => ({ image })));
+            else if (names.length > 1) throw new Error(`Picture ${n} is a Load Image node and takes one image`);
+            else if (names.length) { w.value = names[0]; node.mode = 0; } else node.mode = 4;
+            app.graph.change?.();
+            return { n, images: pictureImages(node) };
+        };
+    });
     await page.exposeFunction("__komikkuKeep", (name, dataUrl) => {
         const file = path.join(out, name);
         fs.writeFileSync(file, Buffer.from(dataUrl.split(",")[1], "base64"));
@@ -69,6 +106,23 @@ async function main() {
                 }, wf);
                 await page.waitForTimeout(1500);
                 console.log("loaded");
+            } else if (cmd === "refs") {
+                console.log(JSON.stringify(await page.evaluate(() => pictures().map(({ n, node }) => ({ n, images: pictureImages(node) }))), null, 1));
+            } else if (cmd === "ref") {
+                const n = Number(args.shift()), files = args.shift();
+                const names = [];
+                for (const file of files === "none" ? [] : files.split(",")) {
+                    const body = new FormData();
+                    body.append("image", new Blob([fs.readFileSync(file)]), path.basename(file));
+                    body.append("subfolder", "komikku");
+                    body.append("type", "input");
+                    body.append("overwrite", "true");
+                    const res = await fetch(`${server}/upload/image`, { method: "POST", body });
+                    if (!res.ok) throw new Error(`upload of ${file} failed (${res.status})`);
+                    const data = await res.json();
+                    names.push(data.subfolder ? `${data.subfolder}/${data.name}` : data.name);
+                }
+                console.log(JSON.stringify(await page.evaluate(({ n, names }) => setPicture(n, names), { n, names })));
             } else if (cmd === "eval") {
                 const body = fs.readFileSync(args.shift(), "utf8");
                 const result = await page.evaluate(async (body) => {

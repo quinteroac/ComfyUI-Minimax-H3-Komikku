@@ -48,6 +48,8 @@ function insidePolygon(pts, x, y) {
     return inside;
 }
 
+const STORY = ["duration", "subjects", "style", "soundscape", "music"];
+
 class LayoutApi {
     constructor(node) { this.node = node; }
 
@@ -64,13 +66,32 @@ class LayoutApi {
         return this.set(layout);
     }
 
-    duration() { return Number(widget(this.node, "duration")?.value) || 10; }
+    // A value linked from another node (the workflows drive duration from a primitive) is read and written at its source.
+    valueWidget(name) {
+        const slot = this.node.inputs?.findIndex((i) => i.name === name && i.link != null);
+        const source = slot >= 0 ? this.node.getInputNode(slot) : null;
+        return source ? source.widgets?.[0] : widget(this.node, name);
+    }
+
+    duration() { return Number(this.valueWidget("duration")?.value) || 10; }
+
+    // The H3 prompt text around the shots: duration in seconds, the <Subject N> definitions tied to the Picture N
+    // references, and the style, soundscape and music lines.
+    story(values = {}) {
+        for (const [name, value] of Object.entries(values)) {
+            const w = STORY.includes(name) && this.valueWidget(name);
+            if (!w) throw new Error(`unknown story field "${name}": use ${STORY.join(", ")}`);
+            w.value = value;
+        }
+        if (Object.keys(values).length) { this.node.setDirtyCanvas?.(true, true); app.graph?.change?.(); }
+        return Object.fromEntries(STORY.map((name) => [name, this.valueWidget(name)?.value]));
+    }
 
     describe() {
         const L = this.get();
         const times = shotTimes(L.panels, this.duration());
         return {
-            page: L.page, margin: L.margin, gutter: L.gutter, direction: L.direction, template: L.preset, reference: L.reference?.image ?? null,
+            story: this.story(), page: L.page, margin: L.margin, gutter: L.gutter, direction: L.direction, template: L.preset, reference: L.reference?.image ?? null,
             panels: L.panels.map((p, i) => ({
                 n: i + 1, aspect: nearestRatio(aspect(p, L)), shape: p.polygon ? "polygon" : "rect", box: [p.x, p.y, p.w, p.h].map(round),
                 time: `${times[i].start.toFixed(1)}-${(times[i].start + times[i].length).toFixed(1)}s`, weight: p.weight ?? 1, prompt: p.prompt,

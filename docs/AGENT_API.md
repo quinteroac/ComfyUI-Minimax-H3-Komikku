@@ -16,7 +16,8 @@ Conventions:
 
 | Call | What it does |
 |---|---|
-| `describe()` | Page, margin, gutter, direction and template. Each panel's number, aspect (`"16:9"`), shape, box, time span, weight and prompt. |
+| `describe()` | Story fields, page, margin, gutter, direction and template. Each panel's number, aspect (`"16:9"`), shape, box, time span, weight and prompt. |
+| `story({duration, subjects, style, soundscape, music})` | Reads or sets the H3 prompt text around the shots. `subjects` ties each `<Subject N>` to its `<Picture N>` reference. A value linked from another node, such as the duration primitive, is set at its source. |
 | `page({format, width, height, margin, gutter, direction})` | Sets the page format: a name from `komikku.pages()` or `width`/`height` in mm. `direction` is `"rtl"` (manga) or `"ltr"` (comic). A page still on its template is rebuilt. |
 | `template(id)` | Applies a template from `komikku.templates()`. The shots are kept in order. |
 | `split(n, "x" \| "y", {at, slant})` | Cuts panel `n`: `"x"` gives side-by-side panels, `"y"` stacked ones. `at` is the cut position across the panel (0.5 by default). `slant` tilts the cut in page fractions. |
