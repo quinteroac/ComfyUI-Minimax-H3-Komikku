@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { detectPanels } from "./panel_detect.js";
-import { assistPanel, generateText } from "./text_assist.js";
+import { detectPanels, matchPanels } from "./panel_detect.js";
+import { assistPanel, generateText, runPrompt } from "./text_assist.js";
 
 const NODE_CLASS = "KomikkuPageLayout";
 const MIN_SIZE = 0.04;
@@ -168,11 +168,26 @@ function inputUrl(name) {
     return api.apiURL(`/view?filename=${encodeURIComponent(name.slice(i + 1))}&subfolder=${encodeURIComponent(name.slice(0, Math.max(0, i)))}&type=input`);
 }
 
-// Copies the panel layout of an existing page: finds its panels, uploads it as the editor reference and returns the new layout.
+// Panel boxes ([x1, y1, x2, y2] in page fractions) found by WeVisOne-VL on an input image, or null when the
+// ComfyUI-WeVisOne-VL pack or its model is not installed.
+async function modelPanelBoxes(image) {
+    const info = await (await api.fetchApi("/object_info/WeVisOneVLLoader")).json();
+    const model = info.WeVisOneVLLoader?.input.required.clip_name[1].options.find((name) => /wevisone/i.test(name));
+    if (!model) return null;
+    const text = await runPrompt({
+        "1": { class_type: "LoadImage", inputs: { image } },
+        "2": { class_type: "WeVisOneVLLoader", inputs: { clip_name: model } },
+        "3": { class_type: "WeVisOneVLPerceive", inputs: { clip: ["2", 0], image: ["1", 0], task: "detection", query: "comic panel", max_length: 1024, individual_masks: false } },
+        "4": { class_type: "PreviewAny", inputs: { source: ["3", 0] } },
+    }, "4");
+    return [...text.matchAll(/<(\d+)><(\d+)><(\d+)><(\d+)>/g)].map((m) => m.slice(1).map((v) => v / 1000));
+}
+
+// Copies the panel layout of an existing page: uploads it as the editor reference, finds its panels and returns the new layout,
+// with a warning when the gutters alone found them. WeVisOne-VL, when installed, finds the panels; the gutter outlines only
+// refine the shapes it found.
 export async function importPageLayout(file, layout) {
     const image = await createImageBitmap(file);
-    const { panels } = detectPanels(image);
-    if (!panels.length) throw new Error("no panels found: the page needs a plain gutter between panels");
     const body = new FormData();
     body.append("image", file, `layout_ref_${Date.now().toString(36)}.png`);
     body.append("subfolder", "komikku");
@@ -180,11 +195,19 @@ export async function importPageLayout(file, layout) {
     const res = await api.fetchApi("/upload/image", { method: "POST", body });
     if (!res.ok) throw new Error(`upload failed (${res.status})`);
     const data = await res.json();
+    const name = data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
+    const { panels: outlines } = detectPanels(image);
+    const boxes = await modelPanelBoxes(name);
+    const panels = boxes?.length ? matchPanels(boxes, outlines) : outlines;
+    if (!panels.length) throw new Error("no panels found: the page needs a plain gutter between panels");
     const H = 257;
     return {
-        ...layout, page: { name: "Imported", width: Math.round(H * image.width / image.height), height: H }, preset: null,
-        panels: withShots(readingOrder(panels.map(importedShape), layout.direction), layout.panels),
-        reference: { image: data.subfolder ? `${data.subfolder}/${data.name}` : data.name, opacity: 0.5 },
+        layout: {
+            ...layout, page: { name: "Imported", width: Math.round(H * image.width / image.height), height: H }, preset: null,
+            panels: withShots(readingOrder(panels.map(importedShape), layout.direction), layout.panels),
+            reference: { image: name, opacity: 0.5 },
+        },
+        warning: boxes ? null : "Panels found from the gutters only: install the ComfyUI-WeVisOne-VL nodes and a WeVisOne-VL-4B model in models/text_encoders for better detection.",
     };
 }
 
@@ -402,6 +425,7 @@ const CSS = `
 .h3pe-shot.sel b { background: var(--pe-accent); color: #fff; }
 .h3pe-shot span { flex: 1; color: var(--pe-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .h3pe-shot span.todo { color: var(--pe-warn); }
+.h3pe-import-note { color: var(--pe-warn); font-size: 11px; line-height: 1.4; }
 .h3pe-shot i { color: var(--pe-muted); font-style: normal; font-size: 10.5px; }
 .h3pe-empty { color: var(--pe-muted); text-align: center; padding: 22px 8px; }
 .h3pe-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--pe-line); }
@@ -590,6 +614,8 @@ class PageEditor {
         Object.assign(this.refOpacity, { min: 0, max: 1, step: 0.05, title: "Reference opacity" });
         this.refOpacity.addEventListener("input", () => { this.layout.reference.opacity = Number(this.refOpacity.value); this.renderReference(); });
         this.refRow = field("Reference", this.refOpacity, button("✕", "Remove the reference page", () => { this.snapshot(); delete this.layout.reference; this.render(); }, "icon outline"));
+        this.importNote = el("div", "h3pe-import-note");
+        this.importNote.style.display = "none";
         left.appendChild(section("Page",
             field("Format", this.pageSelect),
             field("Size", this.pageW, size, this.pageH),
@@ -597,6 +623,7 @@ class PageEditor {
             field("Gutter", this.gutterInput),
             field("Reading", this.rtlBtn, this.ltrBtn),
             field("Import", this.importBtn, file),
+            this.importNote,
             this.refRow));
 
         const templates = el("div", "h3pe-templates");
@@ -760,13 +787,15 @@ class PageEditor {
 
     async importPage(file) {
         this.importBtn.disabled = true;
-        this.hint.textContent = "Finding panels…";
+        this.hint.textContent = "Finding panels… (the first import loads WeVisOne-VL, when installed)";
         try {
-            const layout = await importPageLayout(file, this.layout);
+            const { layout, warning } = await importPageLayout(file, this.layout);
             this.snapshot();
             this.layout = layout;
             this.sel = 0;
             this.render();
+            this.importNote.textContent = warning ?? "";
+            this.importNote.style.display = warning ? "" : "none";
         } catch (err) {
             this.hint.textContent = `Could not import the page: ${err.message}.`;
         } finally {

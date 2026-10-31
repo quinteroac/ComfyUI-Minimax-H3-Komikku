@@ -45,13 +45,18 @@ export async function generateText(loader, system, prompt, creative = false) {
         "2": { class_type: "TextGenerate", inputs: { clip: ["1", 0], prompt, system_prompt: system, max_length: 400, thinking: false, use_default_template: true, mtp: "auto", ...sampling } },
         "3": { class_type: "PreviewAny", inputs: { source: ["2", 0] } },
     };
+    return clean(await runPrompt(graph, "3"));
+}
+
+// Queues an API-format graph on the local server and resolves with the text shown by its PreviewAny node `output`.
+export async function runPrompt(graph, output) {
     const res = await api.fetchApi("/prompt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: graph, client_id: api.clientId ?? api.initialClientId }) });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error?.message ?? `queue failed (${res.status})`);
     const id = data.prompt_id;
     return new Promise((resolve, reject) => {
         const done = (fn, value) => { api.removeEventListener("executed", onExecuted); api.removeEventListener("execution_error", onError); clearTimeout(timer); fn(value); };
-        const onExecuted = ({ detail }) => { if (detail?.prompt_id === id && String(detail.node) === "3") done(resolve, clean(String(detail.output?.text?.[0] ?? ""))); };
+        const onExecuted = ({ detail }) => { if (detail?.prompt_id === id && String(detail.node) === output) done(resolve, String(detail.output?.text?.[0] ?? "")); };
         const onError = ({ detail }) => { if (detail?.prompt_id === id) done(reject, new Error(detail.exception_message ?? "generation failed")); };
         const timer = setTimeout(() => done(reject, new Error("timed out after 10 minutes")), 600000);
         api.addEventListener("executed", onExecuted);

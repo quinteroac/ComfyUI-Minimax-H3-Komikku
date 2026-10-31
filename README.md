@@ -23,7 +23,9 @@ The node is a page layout editor that opens fullscreen from the node.
 
 - Page formats: manga B5/A5, US comic, A4, square, 16:9 or custom. Margin and gutter are adjustable, and the reading order can be manga (right to left) or comic (left to right).
 - 15 layout templates, plus free drawing of rectangles and polygons, slanted cuts with the knife tool, and corner editing.
-- **📄 Import page** copies the panel layout of an existing comic or manga page. The panels are found in the browser from the gutters (white or black paper between panels) and numbered in reading order; the page stays behind them as a reference with adjustable opacity. Art or balloons that cross a gutter can join two panels into one: fix them with the cut and corner tools.
+- **📄 Import page** copies the panel layout of an existing comic or manga page. The panels are numbered in reading order, and the page stays behind them as a reference with adjustable opacity.
+  - When the ComfyUI-WeVisOne-VL nodes are installed with a [WeVisOne-VL-4B](https://huggingface.co/tencent/WeVisOne-VL-4B) model in `models/text_encoders`, the model finds the panels, even borderless ones and panels joined by art or balloons. It takes about 2 s a page once the model is loaded. Slanted cuts keep their shape from the gutters.
+  - Without it, the panels are found in the browser from the gutters (white or black paper between panels). Art or balloons that cross a gutter can join two panels into one: fix them with the cut and corner tools.
 - Panels are numbered. The number sets the shot order, and you can change it by hand or renumber in reading order.
 - One prompt per panel. An optional length weight per shot sits under *Advanced options*.
 - **✨ Enhance with CLIP** rewrites a shot into a richer H3 shot description. It uses the panel's aspect ratio and the neighbouring shots as context, and shows a proposal you can edit before applying.

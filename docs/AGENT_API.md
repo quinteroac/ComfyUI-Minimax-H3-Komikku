@@ -25,7 +25,7 @@ Conventions:
 | `addPanel([x, y, w, h] \| [[x, y], ...], prompt?)` | Adds a rect or polygon panel. |
 | `remove(n)`, `reorder([3, 1, 2, ...])`, `renumber()` | Removes a panel, sets a new shot order, or renumbers in reading order. |
 | `shot(n, prompt, weight?)`, `shots([...])` | Writes one shot, or every shot in order. A shot is a string or `{prompt, weight}`. |
-| `importPage(url \| "komikku/page.png" \| Blob)` | Copies the panel layout of an existing page, like **📄 Import page**. |
+| `importPage(url \| "komikku/page.png" \| Blob)` | Copies the panel layout of an existing page, like **📄 Import page**. Uses WeVisOne-VL when its nodes and model are installed; otherwise the result has a `warning` that only the gutters were used. |
 | `preview(width?)` | PNG data URL of the layout with shot numbers and aspects. Panels without a prompt are red. |
 
 ## Page compose

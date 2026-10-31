@@ -193,7 +193,8 @@ class LayoutApi {
             url = api.apiURL(`/view?type=input&filename=${encodeURIComponent(source.slice(i + 1))}&subfolder=${encodeURIComponent(source.slice(0, Math.max(0, i)))}`);
         }
         const blob = source instanceof Blob ? source : await (await fetch(url)).blob();
-        return this.set(await importPageLayout(blob, this.get()));
+        const { layout, warning } = await importPageLayout(blob, this.get());
+        return warning ? { ...this.set(layout), warning } : this.set(layout);
     }
 
     // PNG data URL of the layout with the shot numbers, for an agent to look at.

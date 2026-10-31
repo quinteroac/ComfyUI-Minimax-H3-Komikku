@@ -182,6 +182,41 @@ function grow(pts, r) {
     });
 }
 
+function inside(poly, x, y) {
+    let hit = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i], [xj, yj] = poly[j];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) hit = !hit;
+    }
+    return hit;
+}
+
+// Intersection over union of two polygons in page fractions, sampled on a grid.
+function overlap(a, b, steps = 120) {
+    let both = 0, either = 0;
+    for (let i = 0; i < steps; i++) {
+        for (let j = 0; j < steps; j++) {
+            const x = (i + 0.5) / steps, y = (j + 0.5) / steps;
+            const inA = inside(a, x, y), inB = inside(b, x, y);
+            both += inA && inB;
+            either += inA || inB;
+        }
+    }
+    return either ? both / either : 0;
+}
+
+// Panel boxes from a detection model ([x1, y1, x2, y2] in page fractions) decide which panels the page has; a four-corner
+// gutter outline that matches a box replaces it, so slanted cuts survive. Outlines with more corners are art or balloons
+// bitten out of a panel, and unmatched ones are dropped.
+export function matchPanels(boxes, outlines, minOverlap = 0.85) {
+    const quads = outlines.filter((o) => o.length === 4);
+    return boxes.map(([x1, y1, x2, y2]) => {
+        const box = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]];
+        const best = quads.map((o) => [overlap(box, o), o]).sort((a, b) => b[0] - a[0])[0];
+        return best && best[0] >= minOverlap ? best[1] : box;
+    });
+}
+
 export function detectPanels(image, { tolerance = 40, minArea = 0.012 } = {}) {
     const { gray, w, h } = pageGray(image);
     const gutter = gutterMask(gray, w, h, paperTest(gray, w, h, tolerance));
